@@ -1,0 +1,102 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // EDUCARE COACHING CLASSES - FIRESTORE SECURITY RULES
+    // =========================================================================
+    // Roles:
+    // 1. Teachers (Admin): Two hardcoded phone numbers have full read/write.
+    // 2. Parents (Client): Read-only access strictly restricted to documents
+    //    where parent_phone matches their authenticated Firebase Phone number.
+    // =========================================================================
+
+    // List of authorized Teacher / Admin phone numbers with international code
+    function isTeacher() {
+      return request.auth != null && (
+        request.auth.token.phone_number == '+919876500001' ||
+        request.auth.token.phone_number == '+919876500002'
+      );
+    }
+
+    // Helper: checks if user is authenticated via Phone OTP
+    function isAuthenticated() {
+      return request.auth != null && request.auth.token.phone_number != null;
+    }
+
+    // Helper: verifies if the caller is the registered parent
+    function isParentOf(parentPhoneNumber) {
+      return isAuthenticated() && request.auth.token.phone_number == parentPhoneNumber;
+    }
+
+    // -------------------------------------------------------------------------
+    // USERS COLLECTION
+    // Schema: { uid, phone_number, role, fcm_token, updated_at }
+    // -------------------------------------------------------------------------
+    match /users/{userId} {
+      // Teachers can read all user records.
+      // Parents can only read and update their own document (e.g. sync FCM token).
+      allow read: if isTeacher() || (isAuthenticated() && request.auth.uid == userId);
+      allow create, update: if isTeacher() || (isAuthenticated() && request.auth.uid == userId);
+      allow delete: if isTeacher();
+    }
+
+    // -------------------------------------------------------------------------
+    // STUDENTS COLLECTION
+    // Schema: { student_id, name, parent_phone, class_grade, created_at }
+    // -------------------------------------------------------------------------
+    match /students/{studentId} {
+      // Teachers have full read/write access across all Std 2 to 12 students.
+      // Parents can ONLY read students where parent_phone matches their auth phone.
+      allow read: if isTeacher() || (
+        isAuthenticated() && resource.data.parent_phone == request.auth.token.phone_number
+      );
+      
+      // Only teachers can enroll, update, or remove students
+      allow write: if isTeacher();
+
+      // -----------------------------------------------------------------------
+      // FEES SUB-COLLECTION (under students/{studentId}/fees/{feeId})
+      // Schema: { total_fees, collected, pending, receipt_pdf_url, updated_at }
+      // -----------------------------------------------------------------------
+      match /fees/{feeId} {
+        // Teacher has full read/write.
+        // Parent can read only if the parent student's parent_phone matches auth phone.
+        allow read: if isTeacher() || (
+          isAuthenticated() &&
+          get(/databases/$(database)/documents/students/$(studentId)).data.parent_phone == request.auth.token.phone_number
+        );
+        allow write: if isTeacher();
+      }
+
+      // -----------------------------------------------------------------------
+      // ATTENDANCE SUB-COLLECTION (under students/{studentId}/attendance/{attendanceId})
+      // Schema: { date: timestamp, status: 'present' | 'absent', remarks: string }
+      // -----------------------------------------------------------------------
+      match /attendance/{attendanceId} {
+        // Teacher has full read/write.
+        // Parent can read only if the parent student's parent_phone matches auth phone.
+        allow read: if isTeacher() || (
+          isAuthenticated() &&
+          get(/databases/$(database)/documents/students/$(studentId)).data.parent_phone == request.auth.token.phone_number
+        );
+        allow write: if isTeacher();
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // ANNOUNCEMENTS COLLECTION (For FCM push notifications & history)
+    // Schema: { title, message, target: 'all' | '+91XXXXXXXXXX', created_at, created_by }
+    // -------------------------------------------------------------------------
+    match /announcements/{announcementId} {
+      allow read: if isTeacher() || (
+        isAuthenticated() && (
+          resource.data.target == 'all' ||
+          resource.data.target == request.auth.token.phone_number
+        )
+      );
+      allow write: if isTeacher();
+    }
+  }
+}
